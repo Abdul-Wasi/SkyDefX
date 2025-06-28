@@ -1,13 +1,19 @@
-// SkyDefXRadarSimulator.java
-
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.awt.event.KeyEvent;
 import java.awt.event.KeyListener;
-import java.awt.event.WindowAdapter; // For closing resources
-import java.awt.event.WindowEvent;   // For closing resources
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.net.ServerSocket; // NEW: Import ServerSocket
+import java.net.Socket; // NEW: Import Socket
+import java.util.concurrent.ExecutorService; // NEW: For server thread pool
+import java.util.concurrent.Executors; // NEW: For server thread pool
+import org.json.JSONObject; // Assuming you have org.json in your classpath
 
 public class SkyDefXRadarSimulator extends JFrame implements KeyListener, ActionListener {
 
@@ -19,7 +25,17 @@ public class SkyDefXRadarSimulator extends JFrame implements KeyListener, Action
     private InitializationSequencePanel initializationSequencePanel;
     private MainControlDashboard mainControlDashboard;
 
-    private DroneDetectionClient droneDetectionClient; // NEW: Drone Detection Client
+    // Remove DroneDetectionClient instance:
+    // private DroneDetectionClient droneDetectionClient;
+
+    // NEW: Server socket components
+    private ServerSocket serverSocket;
+    private Socket clientSocket;
+    private BufferedReader in;
+    private boolean serverRunning = false; // Flag to control server thread
+    private ExecutorService serverExecutor; // Thread pool for server operations
+
+    private static final int SERVER_PORT = 12345; // Port for Python script to connect to
 
     private static final String IDENTITY_SCREEN_CARD = "IdentityScreen";
     private static final String PASSCODE_SCREEN_CARD = "PasscodeScreen";
@@ -59,17 +75,98 @@ public class SkyDefXRadarSimulator extends JFrame implements KeyListener, Action
         setFocusable(true);
         setFocusTraversalKeysEnabled(false);
 
-        // NEW: Add WindowListener to stop client and sounds on close
+        // Add WindowListener to stop server and sounds on close
         addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosing(WindowEvent e) {
-                if (droneDetectionClient != null && droneDetectionClient.isRunning()) {
-                    droneDetectionClient.stopClient();
-                }
-                SoundPlayer.stopAllSounds(); // Ensure all sounds are stopped
-                System.out.println("SkyDefXRadarSimulator: Application closing. Client and sounds stopped.");
+                stopServer(); // Stop the server when the window closes
+                SoundPlayer.stopAllSounds();
+                System.out.println("SkyDefXRadarSimulator: Application closing. Server and sounds stopped.");
             }
         });
+
+        // Initialize server executor service
+        serverExecutor = Executors.newSingleThreadExecutor();
+    }
+
+    // --- NEW: Server Methods ---
+    private void startServer() {
+        if (serverRunning) {
+            System.out.println("Java Radar Server is already running.");
+            return;
+        }
+
+        serverRunning = true;
+        serverExecutor.submit(() -> {
+            try {
+                serverSocket = new ServerSocket(SERVER_PORT);
+                System.out.println("Java Radar Server: Listening on port " + SERVER_PORT + " for Python connections...");
+
+                while (serverRunning) {
+                    try {
+                        clientSocket = serverSocket.accept(); // This waits for Python to connect
+                        System.out.println("Java Radar Server: Python client connected from " + clientSocket.getInetAddress());
+
+                        in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
+                        String line;
+                        while (serverRunning && (line = in.readLine()) != null) {
+                            try {
+                                JSONObject json = new JSONObject(line);
+                                // System.out.println("Java Radar Server: Received JSON: " + json.toString()); // Uncomment for verbose debug
+                                if (mainControlDashboard != null) {
+                                    // Make sure to update UI on the Event Dispatch Thread
+                                    SwingUtilities.invokeLater(() -> mainControlDashboard.handlePythonDetection(json));
+                                }
+                            } catch (org.json.JSONException e) {
+                                System.err.println("Java Radar Server: Failed to parse JSON: " + line + " - " + e.getMessage());
+                            }
+                        }
+                    } catch (IOException e) {
+                        if (serverRunning) { // Only print error if server was supposed to be running
+                            System.err.println("Java Radar Server: Error in client connection or reading: " + e.getMessage());
+                        }
+                    } finally {
+                        // Close client resources if disconnected or error
+                        try {
+                            if (in != null) in.close();
+                            if (clientSocket != null) clientSocket.close();
+                            System.out.println("Java Radar Server: Python client disconnected.");
+                        } catch (IOException e) {
+                            System.err.println("Java Radar Server: Error closing client resources: " + e.getMessage());
+                        }
+                    }
+                }
+            } catch (IOException e) {
+                System.err.println("Java Radar Server: Could not start server on port " + SERVER_PORT + ": " + e.getMessage());
+                e.printStackTrace();
+            } finally {
+                // Ensure server socket is closed when server stops
+                try {
+                    if (serverSocket != null && !serverSocket.isClosed()) {
+                        serverSocket.close();
+                        System.out.println("Java Radar Server: Server socket closed.");
+                    }
+                } catch (IOException e) {
+                    System.err.println("Java Radar Server: Error closing server socket: " + e.getMessage());
+                }
+                serverRunning = false;
+            }
+        });
+    }
+
+    private void stopServer() {
+        System.out.println("Java Radar Server: Stopping server...");
+        serverRunning = false;
+        if (serverExecutor != null) {
+            serverExecutor.shutdownNow(); // Interrupt server thread
+        }
+        try {
+            if (clientSocket != null) clientSocket.close(); // Close any active client connection
+            if (serverSocket != null) serverSocket.close(); // Close the server socket
+        } catch (IOException e) {
+            System.err.println("Java Radar Server: Error stopping server resources: " + e.getMessage());
+        }
+        System.out.println("Java Radar Server: Server stopped.");
     }
 
     // --- KeyListener Methods ---
@@ -83,22 +180,17 @@ public class SkyDefXRadarSimulator extends JFrame implements KeyListener, Action
             if (initializationSequencePanel.isSequenceFinishedTyping() &&
                 e.getKeyCode() == KeyEvent.VK_ENTER) {
 
-                // Play the beep sound immediately before transitioning to dashboard
-                SoundPlayer.stopStartupSound(); // Stop background startup sound
+                SoundPlayer.stopStartupSound();
                 SoundPlayer.playSound("system_online_beep.wav");
                 System.out.println("SkyDefXRadarSimulator: ENTER pressed. Playing system_online_beep.wav and proceeding to Main Dashboard.");
 
                 System.out.println("Proceeding to Main Dashboard...");
                 cardLayout.show(cardPanel, MAIN_DASHBOARD_CARD);
-                currentActiveCard = MAIN_DASHBOARD_CARD; // Update active card
+                currentActiveCard = MAIN_DASHBOARD_CARD;
                 mainControlDashboard.requestFocusInWindow();
 
-                // NEW: Start the drone detection client when dashboard is shown
-                if (droneDetectionClient == null) {
-                    // Pass a method reference to the dashboard's handler
-                    droneDetectionClient = new DroneDetectionClient(mainControlDashboard::handlePythonDetection);
-                }
-                droneDetectionClient.startClient();
+                // NEW: Start the server here instead of the client
+                startServer();
             }
         }
     }
@@ -121,7 +213,7 @@ public class SkyDefXRadarSimulator extends JFrame implements KeyListener, Action
             System.out.println("Access granted. Proceeding to initialization.");
             cardLayout.show(cardPanel, INIT_SEQUENCE_CARD);
             currentActiveCard = INIT_SEQUENCE_CARD;
-            SoundPlayer.playSound("system_startup.wav"); // Starts the background startup sound
+            SoundPlayer.playSound("system_startup.wav");
             initializationSequencePanel.startSequence();
         } else if (e.getActionCommand().equals("init_sequence_finished")) {
             System.out.println("Initialization sequence finished typing. Waiting for ENTER.");
