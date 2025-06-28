@@ -1,4 +1,4 @@
-// SoundPlayer.java (FIXED: Removed LineEvent.Type.END for broader compatibility)
+// SoundPlayer.java
 
 import javax.sound.sampled.*;
 import java.io.IOException;

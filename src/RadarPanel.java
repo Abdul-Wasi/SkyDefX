@@ -1,78 +1,73 @@
-// RadarPanel.java (Updated for Object Trails)
-
-import javax.swing.*;                   // Provides JPanel, Timer, JTextArea (for outputting to dashboard)
-import java.awt.*;                      // Provides Graphics, Graphics2D, Color, BasicStroke, RenderingHints
-import java.awt.event.ActionEvent;      // Class representing an action event
-import java.awt.event.ActionListener;   // Interface for receiving action events
-import java.awt.event.MouseAdapter;     // For handling mouse events easily
-import java.awt.event.MouseEvent;       // Class representing a mouse event
-import java.awt.geom.Point2D;           // NEW: For drawing object trails
-import java.util.ArrayList;             // Original list type (not used directly, but part of context)
-import java.util.List;                  // Interface for list
-import java.util.Iterator;              // For safely removing elements
-import java.util.concurrent.CopyOnWriteArrayList; // Thread-safe list for concurrent access
-import java.time.LocalTime;             // For logging timestamps
-import java.time.format.DateTimeFormatter; // For formatting time in logs
-import java.util.LinkedList;            // For storing beam angle history
-
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.ActionEvent;
+import java.awt.event.ActionListener;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.awt.geom.Point2D;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap; // For thread-safe map access
+import java.util.concurrent.CopyOnWriteArrayList; // For thread-safe list access during iteration
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.util.LinkedList;
+import org.json.JSONObject; // Import for JSON processing
 
 class RadarPanel extends JPanel implements ActionListener {
 
     // --- Private Fields ---
     private double beamAngle = 0;
     private Timer timer;
-    private List<AirborneObject> airborneObjects; // List to manage all airborne objects
-    private JTextArea detectedObjectsListArea; // Reference to the detected objects list in the dashboard
-    private JTextArea systemLogArea;         // Reference to the system log area in the dashboard
+    // Changed to Map for easy lookup by objectID from Python
+    private Map<String, AirborneObject> detectedObjectsMap;
+    private List<AirborneObject> activeObjectsList; // To maintain drawing order, will be derived from map values
+    private JTextArea detectedObjectsListArea;
+    private JTextArea systemLogArea;
 
     private AirborneObject selectedObject; // Holds the object currently selected by clicking
-    private List<String> currentlyDetectedIDsInBeam; // Tracks IDs of objects hit by the current beam sweep
 
     private static final long DETECTION_DISPLAY_DURATION = 1000; // milliseconds to show "DETECTED!" status
-    private long lastDetectionVisualTime = 0; // Timestamp of the last detection (for blinking effect)
-
-    private boolean initialObjectsSpawned = false; // Flag to control initial object creation
+    private static final long OBJECT_EXPIRATION_TIME = 5000; // Milliseconds after last detection to remove object
 
     // Fields for Radar Afterglow Effect
-    private LinkedList<Double> beamAngleHistory; // Stores past beam angles for the trail
+    private LinkedList<Double> beamAngleHistory;
     private static final int MAX_BEAM_HISTORY_SIZE = 50; // Number of past beam positions to store (20ms/frame * 50 = 1 sec trail)
 
+    // --- Constants for Radar Scaling ---
+    private static final double MAX_RADAR_RANGE_METERS = 5000; // Max range of our simulated radar in meters
+    private double pixelsPerMeter; // Calculated based on panel size
 
     // --- Constructor ---
-    // Modified constructor to accept JTextArea references from the main frame.
     public RadarPanel(JTextArea detectedObjectsListArea, JTextArea systemLogArea) {
         this.detectedObjectsListArea = detectedObjectsListArea;
         this.systemLogArea = systemLogArea;
-        
+
         setBackground(new Color(10, 10, 10)); // Very dark background for the radar scope
-        airborneObjects = new CopyOnWriteArrayList<>(); // Using thread-safe list
-        currentlyDetectedIDsInBeam = new ArrayList<>(); // Initialize tracking list for beam hits
+        detectedObjectsMap = new ConcurrentHashMap<>(); // Thread-safe map for detections
+        activeObjectsList = new CopyOnWriteArrayList<>(); // Thread-safe list for drawing iteration
         selectedObject = null; // No object selected initially
 
-        // Initialize beam angle history
-        beamAngleHistory = new LinkedList<>(); 
+        beamAngleHistory = new LinkedList<>();
 
         timer = new Timer(20, this); // Animation timer (20ms interval)
         timer.start(); // Start the animation loop
 
-        // Add MouseListener for interactivity
         addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
-                handleClick(e.getX(), e.getY()); // Call a helper method to handle the click
+                handleClick(e.getX(), e.getY());
             }
         });
 
-        // Log initial message to system log
-        appendLog("System initialized. Radar online. Scanning airspace...");
+        appendLog("System initialized. Radar online. Waiting for detections...");
     }
 
     // --- Helper Method to Append to System Log ---
     private void appendLog(String message) {
-        // Use SwingUtilities.invokeLater to ensure updates to JTextArea happen on the EDT.
         SwingUtilities.invokeLater(() -> {
             systemLogArea.append(LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")) + " - " + message + "\n");
-            // Auto-scroll to the bottom of the log area
             systemLogArea.setCaretPosition(systemLogArea.getDocument().getLength());
         });
     }
@@ -81,29 +76,33 @@ class RadarPanel extends JPanel implements ActionListener {
     private void updateDetectedObjectsList() {
         SwingUtilities.invokeLater(() -> {
             StringBuilder sb = new StringBuilder();
-            sb.append(String.format("%-10s %-8s %-6s %-6s %-8s\n", "ID", "X", "Y", "ALT", "STATUS")); // Header with STATUS
-            sb.append("--------------------------------------------------\n"); // Separator
+            sb.append(String.format("%-10s %-8s %-6s %-6s %-8s\n", "ID", "X", "Y", "ALT", "STATUS"));
+            sb.append("--------------------------------------------------\n");
 
             boolean detectedAny = false;
-            for (AirborneObject obj : airborneObjects) {
-                // We only list objects that are currently within the radar's sweep OR are selected.
-                if (obj.isCurrentlyDetectedByBeam() || obj == selectedObject) { // Check for beam hit OR selection
+            long currentTime = System.currentTimeMillis();
+
+            // Iterate over values of the map for display
+            for (AirborneObject obj : activeObjectsList) {
+                // Only list objects that are still active (not expired)
+                if (currentTime - obj.getLastDetectionTimestamp() < OBJECT_EXPIRATION_TIME) {
                     detectedAny = true;
-                    // Coordinates relative to radar center
                     int centerX = getWidth() / 2;
                     int centerY = getHeight() / 2;
-                    int relativeX = (int) (obj.getX() - centerX);
-                    int relativeY = (int) (obj.getY() - centerY);
+                    int relativeX = (int) (obj.getX() + obj.getSize() / 2 - centerX); // Center of object relative to radar center
+                    int relativeY = (int) (obj.getY() + obj.getSize() / 2 - centerY); // Center of object relative to radar center
 
-                    String status = "ACTIVE"; // Default status
+                    String status = "ACTIVE";
                     if (obj == selectedObject) {
-                        status = "TARGETED"; // Highlight in list if selected
-                    } else if (obj.isCurrentlyDetectedByBeam()) {
+                        status = "TARGETED";
+                    } else if (obj.isCurrentlyDetectedByBeam()) { // Check current active detection status
                         status = "DETECTED";
+                    } else if (currentTime - obj.getLastDetectionTimestamp() < AirborneObject.DETECTION_FADE_DURATION) {
+                         status = "LAST SEEN"; // Indicate it was seen recently but not current beam
                     }
 
                     sb.append(String.format("%-10s %-8d %-6d %-6d %-8s\n",
-                            obj.getObjectID(), relativeX, relativeY, obj.getAltitude(), status));
+                                    obj.getObjectID(), relativeX, relativeY, obj.getAltitude(), status));
                 }
             }
 
@@ -111,44 +110,40 @@ class RadarPanel extends JPanel implements ActionListener {
                 sb.append("No active detections.\n");
             }
 
-            detectedObjectsListArea.setText(sb.toString()); // Set the updated text
+            detectedObjectsListArea.setText(sb.toString());
         });
     }
 
     // Handle mouse clicks on the radar panel
     private void handleClick(int mouseX, int mouseY) {
         AirborneObject clickedOn = null;
-        for (AirborneObject obj : airborneObjects) {
-            // Check if the click is within the object's bounding box
-            // AND if the object is currently within the visible radar area (maxRadarRadius)
-            int centerX = getWidth() / 2;
-            int centerY = getHeight() / 2;
-            int maxRadarRadius = Math.min(centerX, centerY) - 20;
-            double distance = Math.sqrt(Math.pow(obj.getX() - centerX, 2) + Math.pow(obj.getY() - centerY, 2));
+        int centerX = getWidth() / 2;
+        int centerY = getHeight() / 2;
+        int maxRadarRadius = Math.min(centerX, centerY) - 20;
 
-            if (distance <= maxRadarRadius && // Object must be within the radar's visual range
+        for (AirborneObject obj : activeObjectsList) {
+            double distanceToCenter = Math.sqrt(Math.pow(obj.getX() + obj.getSize()/2 - centerX, 2) + Math.pow(obj.getY() + obj.getSize()/2 - centerY, 2));
+
+            if (distanceToCenter <= maxRadarRadius && // Object must be within radar's visual range
                 mouseX >= obj.getX() && mouseX <= obj.getX() + obj.getSize() &&
                 mouseY >= obj.getY() && mouseY <= obj.getY() + obj.getSize()) {
                 clickedOn = obj;
-                break; // Found an object, stop checking
+                break;
             }
         }
 
         if (clickedOn != null) {
             if (clickedOn == selectedObject) {
-                // If the same object is clicked again, deselect it
                 selectedObject = null;
                 appendLog("Object deselected: " + clickedOn.getObjectID());
             } else {
-                // Select the new object
                 selectedObject = clickedOn;
                 appendLog("Object selected: " + selectedObject.getObjectID() +
-                          " at X:" + (int)(selectedObject.getX() - getWidth()/2) +
-                          " Y:" + (int)(selectedObject.getY() - getHeight()/2) +
-                          " Alt:" + selectedObject.getAltitude() + "m");
+                                " at X:" + (int)(selectedObject.getX() + selectedObject.getSize()/2 - getWidth()/2) +
+                                " Y:" + (int)(selectedObject.getY() + selectedObject.getSize()/2 - getHeight()/2) +
+                                " Alt:" + selectedObject.getAltitude() + "m");
             }
         } else {
-            // Clicked on empty space, deselect any currently selected object
             if (selectedObject != null) {
                 appendLog("Clicked on empty radar space. Deselecting object: " + selectedObject.getObjectID());
                 selectedObject = null;
@@ -156,15 +151,82 @@ class RadarPanel extends JPanel implements ActionListener {
                 appendLog("Clicked on empty radar space.");
             }
         }
-        repaint(); // Repaint to show/hide selection highlight
-        updateDetectedObjectsList(); // Update the list to reflect selection status
+        repaint();
+        updateDetectedObjectsList();
     }
 
-    // --- addNotify Method ---
-    @Override
-    public void addNotify() {
-        super.addNotify();
-        // Initial object creation is now handled in actionPerformed once panel dimensions are stable.
+    // --- handlePythonDetection Method ---
+    // This is the primary entry point for Python-originated detection data
+    public void handlePythonDetection(JSONObject droneData) {
+        if (getWidth() <= 0 || getHeight() <= 0) {
+            // Panel not yet fully laid out, ignore detections for now
+            return;
+        }
+        // Calculate pixelsPerMeter once panel dimensions are stable
+        if (pixelsPerMeter == 0) {
+            int centerX = getWidth() / 2;
+            int centerY = getHeight() / 2;
+            int maxRadarRadius = Math.min(centerX, centerY) - 20;
+            pixelsPerMeter = (double) maxRadarRadius / MAX_RADAR_RANGE_METERS;
+            appendLog("Radar panel dimensions established. Max range: " + MAX_RADAR_RANGE_METERS + "m.");
+        }
+
+        try {
+            String objectID = droneData.getString("id");
+            double azimuthDeg = droneData.getDouble("azimuth"); // Azimuth in degrees (0-360)
+            double elevationDeg = droneData.getDouble("elevation"); // Elevation in degrees
+            double distanceMeters = droneData.getDouble("distance");
+
+            // Convert degrees to radians for trigonometric functions
+            double azimuthRad = Math.toRadians(azimuthDeg);
+            double elevationRad = Math.toRadians(elevationDeg);
+
+            // Convert polar to Cartesian coordinates for display on panel
+            // Radar display typically has 0 degrees (North) at the top, increasing clockwise.
+            // Java's Math.sin/cos use radians, where 0 is along the positive X-axis (right),
+            // and angles increase counter-clockwise.
+            // To map:
+            // Radar North (0 deg) -> Java angle for (0, -Y) -> Math.toRadians(0 - 90) = -PI/2
+            // Radar East (90 deg) -> Java angle for (+X, 0) -> Math.toRadians(90 - 90) = 0
+            // Radar South (180 deg) -> Java angle for (0, +Y) -> Math.toRadians(180 - 90) = PI/2
+            // Radar West (270 deg) -> Java angle for (-X, 0) -> Math.toRadians(270 - 90) = PI
+
+            double scaledDistance = distanceMeters * pixelsPerMeter;
+            int centerX = getWidth() / 2;
+            int centerY = getHeight() / 2;
+
+            double targetX = centerX + (scaledDistance * Math.cos(azimuthRad - Math.PI / 2));
+            double targetY = centerY + (scaledDistance * Math.sin(azimuthRad - Math.PI / 2));
+
+            // Calculate altitude based on elevation and distance
+            int displayAltitude = (int) (distanceMeters * Math.sin(elevationRad));
+            if (displayAltitude < 0) displayAltitude = 0; // Altitude can't be negative
+
+            int objectSize = 10; // Standard size for a detected object
+
+            AirborneObject obj = detectedObjectsMap.get(objectID);
+
+            if (obj == null) {
+                // New object detected: create and add to map and drawing list
+                obj = new AirborneObject(objectID, targetX - objectSize / 2.0, targetY - objectSize / 2.0, displayAltitude, objectSize);
+                detectedObjectsMap.put(objectID, obj);
+                activeObjectsList.add(obj); // Add to list for drawing
+                appendLog("NEW DETECTED: ID " + objectID + String.format(" at X:%d, Y:%d, Alt:%dm (from Python)",
+                                (int)(targetX - centerX), (int)(targetY - centerY), displayAltitude));
+            } else {
+                // Existing object, update its position and status
+                obj.updatePosition(targetX - objectSize / 2.0, targetY - objectSize / 2.0, displayAltitude);
+            }
+            // Ensure visual detection state for blinking.
+            obj.setCurrentlyDetectedByBeam(true); // This sets the timestamp internally
+
+        } catch (org.json.JSONException e) {
+            appendLog("ERROR: Failed to parse drone detection JSON: " + e.getMessage());
+        } catch (Exception e) {
+            appendLog("ERROR in handlePythonDetection: " + e.getMessage());
+            e.printStackTrace();
+        }
+        repaint(); // Request a repaint to show new/updated objects
     }
 
     // --- paintComponent Method ---
@@ -188,7 +250,7 @@ class RadarPanel extends JPanel implements ActionListener {
         for (int i = 1; i <= 4; i++) {
             int currentRadius = radius / 4 * i;
             g2d.drawOval(centerX - currentRadius, centerY - currentRadius,
-                         2 * currentRadius, 2 * currentRadius);
+                    2 * currentRadius, 2 * currentRadius);
         }
 
         // Draw the Radar Beam Afterglow
@@ -196,11 +258,13 @@ class RadarPanel extends JPanel implements ActionListener {
         int currentBeamIndex = 0;
         for (Double historyAngle : beamAngleHistory) {
             float alpha = 1.0f - (currentBeamIndex * alphaStepBeam);
-            if (alpha < 0.0f) alpha = 0.0f; // Ensure alpha doesn't go negative
+            if (alpha < 0.0f) alpha = 0.0f;
 
-            g2d.setColor(new Color(50, 255, 50, (int)(alpha * 150))); 
-            g2d.setStroke(new BasicStroke(3)); 
+            g2d.setColor(new Color(50, 255, 50, (int)(alpha * 150)));
+            g2d.setStroke(new BasicStroke(3));
 
+            // Adjust beam angle for drawing: Java's 0 is right, positive is CCW. Radar's 0 is up, positive is CW.
+            // Need to rotate by -90 degrees (or -PI/2 radians)
             int histBeamX = (int) (centerX + radius * Math.cos(historyAngle - Math.PI / 2));
             int histBeamY = (int) (centerY + radius * Math.sin(historyAngle - Math.PI / 2));
             g2d.drawLine(centerX, centerY, histBeamX, histBeamY);
@@ -218,184 +282,108 @@ class RadarPanel extends JPanel implements ActionListener {
 
         // --- Draw All Airborne Objects, Their Trails, and Information ---
         g2d.setFont(new Font("Monospaced", Font.PLAIN, 12));
-        for (AirborneObject obj : airborneObjects) {
-            // NEW: Draw Object Trail
+        long currentTime = System.currentTimeMillis();
+
+        // Use activeObjectsList for drawing, which gets pruned in actionPerformed
+        for (AirborneObject obj : activeObjectsList) {
+            // Only draw objects that are within radar range and not too old
+            double distanceToCenter = Math.sqrt(Math.pow(obj.getX() + obj.getSize()/2.0 - centerX, 2) + Math.pow(obj.getY() + obj.getSize()/2.0 - centerY, 2));
+
+            if (distanceToCenter > radius || (currentTime - obj.getLastDetectionTimestamp() > OBJECT_EXPIRATION_TIME)) {
+                // Object out of range or expired, will be removed from list later. Don't draw now.
+                continue;
+            }
+
+            // Draw Object Trail
             LinkedList<Point2D.Double> currentTrail = obj.getTrail();
-            if (currentTrail.size() > 1) { // Need at least two points to draw a line
-                // The MAX_TRAIL_LENGTH is defined in AirborneObject, so calculate alpha step based on that
+            if (currentTrail.size() > 1) {
                 float alphaStepTrail = 1.0f / (float) AirborneObject.MAX_TRAIL_LENGTH;
-                
+
                 for (int i = 0; i < currentTrail.size() - 1; i++) {
                     Point2D.Double p1 = currentTrail.get(i);
                     Point2D.Double p2 = currentTrail.get(i + 1);
 
-                    // Calculate transparency for trail segments (older segments are more transparent)
                     float alpha = 1.0f - ((float) i * alphaStepTrail);
-                    if (alpha < 0.0f) alpha = 0.0f; 
-                    
-                    // Fading red trail, slightly translucent (max alpha 150 for trail)
-                    g2d.setColor(new Color(255, 0, 0, (int)(alpha * 150))); 
-                    g2d.setStroke(new BasicStroke(1)); // Thin line for trail
+                    if (alpha < 0.0f) alpha = 0.0f;
+
+                    g2d.setColor(new Color(255, 0, 0, (int)(alpha * 150)));
+                    g2d.setStroke(new BasicStroke(1));
 
                     g2d.drawLine((int) p1.x, (int) p1.y, (int) p2.x, (int) p2.y);
                 }
             }
 
-            // Draw highlight if this object is selected, regardless of detection status
+            // Draw highlight if this object is selected
             if (obj == selectedObject) {
                 g2d.setColor(new Color(255, 165, 0)); // Orange highlight
-                g2d.setStroke(new BasicStroke(2)); // Thicker border
-                // Draw a slightly larger square outline around the object
+                g2d.setStroke(new BasicStroke(2));
                 g2d.drawRect((int) obj.getX() - 2, (int) obj.getY() - 2, obj.getSize() + 4, obj.getSize() + 4);
-                g2d.setStroke(new BasicStroke(1)); // Reset stroke for subsequent drawing
+                g2d.setStroke(new BasicStroke(1));
             }
 
-            // Only draw "DETECTED!" text and line for a short duration after beam hit
-            if (obj.isCurrentlyDetectedByBeam() && (System.currentTimeMillis() - lastDetectionVisualTime < DETECTION_DISPLAY_DURATION)) {
-                 obj.draw(g2d); // Draw in yellow (from AirborneObject)
-                 g2d.setColor(new Color(255, 255, 0)); // Bright yellow for DETECTED text and lines
-                 g2d.setStroke(new BasicStroke(1, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10.0f, new float[]{5.0f, 5.0f}, 0.0f)); // Dashed line
-                 g2d.drawLine(centerX, centerY, (int)obj.getX(), (int)obj.getY());
-                 g2d.drawString("DETECTED!", (int)obj.getX() + 15, (int)obj.getY() + 5);
-            } else {
-                 // If not currently detected by beam, or if detection visual time passed, draw in default red
-                 obj.draw(g2d); // Draw in red (from AirborneObject)
+            // Draw object and "DETECTED!" text
+            obj.draw(g2d); // AirborneObject's draw method handles yellow/red based on lastDetectionTimestamp
+
+            if (obj.isCurrentlyDetectedByBeam() && (currentTime - obj.getLastDetectionTimestamp() < DETECTION_DISPLAY_DURATION)) {
+                g2d.setColor(new Color(255, 255, 0)); // Bright yellow for DETECTED text and lines
+                g2d.setStroke(new BasicStroke(1, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10.0f, new float[]{5.0f, 5.0f}, 0.0f)); // Dashed line
+                g2d.drawLine(centerX, centerY, (int)(obj.getX() + obj.getSize()/2), (int)(obj.getY() + obj.getSize()/2));
+                g2d.drawString("DETECTED!", (int)obj.getX() + obj.getSize() + 5, (int)obj.getY() + obj.getSize()/2 + 5);
             }
-           
+
             g2d.setColor(new Color(200, 200, 200)); // Lighter grey for all other info
 
             String idAndCoords = String.format("ID: %s | X: %d, Y: %d",
                                                obj.getObjectID(),
-                                               ((int)obj.getX() - centerX),
-                                               ((int)obj.getY() - centerY));
+                                               ((int)obj.getX() + obj.getSize()/2 - centerX),
+                                               ((int)obj.getY() + obj.getSize()/2 - centerY));
             String altitudeInfo = String.format("Alt: %d m", obj.getAltitude());
 
-            g2d.drawString(idAndCoords, (int)obj.getX() + 15, (int)obj.getY() + 20);
-            g2d.drawString(altitudeInfo, (int)obj.getX() + 15, (int)obj.getY() + 35);
+            g2d.drawString(idAndCoords, (int)obj.getX() + obj.getSize() + 5, (int)obj.getY() + obj.getSize()/2 + 20);
+            g2d.drawString(altitudeInfo, (int)obj.getX() + obj.getSize() + 5, (int)obj.getY() + obj.getSize()/2 + 35);
         }
     }
 
-    // --- actionPerformed Method (Simulation Logic) ---
+    // --- actionPerformed Method (Object Lifecycle) ---
     @Override
     public void actionPerformed(ActionEvent e) {
-        // --- DEBUG PRINT: Check if this method is being called ---
-        System.out.println("Action Performed! Panel Size: " + getWidth() + "x" + getHeight()); 
-
-        // --- Delayed Initial Object Spawning ---
-        if (!initialObjectsSpawned && getWidth() > 0 && getHeight() > 0) {
-            for (int i = 0; i < 5; i++) {
-                airborneObjects.add(new AirborneObject(getWidth(), getHeight()));
-            }
-            appendLog("Initial airborne objects generated.");
-            initialObjectsSpawned = true; // Set flag to true after initial spawn
-        }
-
-        // Update radar beam angle
+        // Update radar beam angle for visual sweep
         beamAngle += 0.05;
         if (beamAngle > 2 * Math.PI) {
             beamAngle -= 2 * Math.PI;
         }
 
         // Add current beam angle to history
-        beamAngleHistory.addFirst(beamAngle); // Add to the front (newest)
+        beamAngleHistory.addFirst(beamAngle);
         if (beamAngleHistory.size() > MAX_BEAM_HISTORY_SIZE) {
-            beamAngleHistory.removeLast(); // Remove the oldest if history is too long
+            beamAngleHistory.removeLast();
         }
 
+        // --- Object Lifecycle Management (Removal of expired objects) ---
+        long currentTime = System.currentTimeMillis();
+        List<String> objectIDsToRemove = new ArrayList<>();
 
-        // --- Object Movement and Lifecycle Management ---
-        List<AirborneObject> objectsToRemove = new ArrayList<>(); 
-
-        for (AirborneObject obj : airborneObjects) { 
-            obj.move(getWidth(), getHeight()); // This also updates the object's internal trail history
-
-            // If object moves off-screen, mark it for removal and add a new one
-            if (obj.getX() < -obj.getSize() || obj.getX() > getWidth() + obj.getSize() ||
-                obj.getY() < -obj.getSize() || obj.getY() > getHeight() + obj.getSize()) {
-                
+        // Iterate through activeObjectsList for removal (CopyOnWriteArrayList allows safe iteration during modification)
+        for (AirborneObject obj : activeObjectsList) {
+            // If an object hasn't been updated by Python for OBJECT_EXPIRATION_TIME, remove it
+            if (currentTime - obj.getLastDetectionTimestamp() > OBJECT_EXPIRATION_TIME) {
+                objectIDsToRemove.add(obj.getObjectID());
                 if (obj == selectedObject) {
                     selectedObject = null;
-                    appendLog("Selected object " + obj.getObjectID() + " exited radar range. Deselected.");
+                    appendLog("Selected object " + obj.getObjectID() + " expired/lost detection. Deselected.");
                 } else {
-                    appendLog("Object " + obj.getObjectID() + " exited radar range.");
+                    appendLog("Object " + obj.getObjectID() + " expired/lost detection.");
                 }
-                
-                currentlyDetectedIDsInBeam.remove(obj.getObjectID());
-                objectsToRemove.add(obj); // Mark for removal
             }
         }
 
-        // Now, remove the marked objects and add new ones AFTER iteration
-        for (AirborneObject obj : objectsToRemove) {
-            airborneObjects.remove(obj); 
-            AirborneObject newObj = new AirborneObject(getWidth(), getHeight()); 
-            airborneObjects.add(newObj); 
-            appendLog("New object " + newObj.getObjectID() + " entered airspace.");
-            updateDetectedObjectsList(); 
+        // Remove from map and list
+        for (String id : objectIDsToRemove) {
+            detectedObjectsMap.remove(id);
+            activeObjectsList.removeIf(obj -> obj.getObjectID().equals(id));
         }
 
-
-        // --- Radar Detection Logic ---
-        int centerX = getWidth() / 2;
-        int centerY = getHeight() / 2;
-        int maxRadarRadius = Math.min(centerX, centerY) - 20;
-
-        // Reset beam detection status for all objects at the start of each sweep
-        for (AirborneObject obj : airborneObjects) {
-            obj.setCurrentlyDetectedByBeam(false);
-        }
-
-        for (AirborneObject obj : airborneObjects) {
-            double objectX = obj.getX();
-            double objectY = obj.getY();
-            double distance = Math.sqrt(Math.pow(objectX - centerX, 2) + Math.pow(objectY - centerY, 2));
-
-            // Check if object is within radar's maximum range
-            if (distance <= maxRadarRadius) {
-                double objectAngle = Math.atan2(objectY - centerY, objectX - centerX);
-                if (objectAngle < 0) {
-                    objectAngle += 2 * Math.PI; 
-                }
-                double normalizedBeamAngle = beamAngle - Math.PI / 2; 
-                if (normalizedBeamAngle < 0) {
-                    normalizedBeamAngle += 2 * Math.PI;
-                }
-                double angleTolerance = Math.toRadians(5); // 5-degree wide beam
-
-                // Check if the object is within the radar beam's current sweep angle
-                boolean hitByBeam = false;
-                if (Math.abs(objectAngle - normalizedBeamAngle) < angleTolerance) {
-                    hitByBeam = true;
-                } else if (normalizedBeamAngle < angleTolerance && objectAngle > (2 * Math.PI - angleTolerance)) {
-                    hitByBeam = true; 
-                } else if (objectAngle < angleTolerance && normalizedBeamAngle > (2 * Math.PI - angleTolerance)) {
-                    hitByBeam = true; 
-                }
-                
-                // Manage detection status and logging
-                if (hitByBeam) {
-                    obj.setCurrentlyDetectedByBeam(true); 
-                    if (!currentlyDetectedIDsInBeam.contains(obj.getObjectID())) {
-                        lastDetectionVisualTime = System.currentTimeMillis(); 
-                        currentlyDetectedIDsInBeam.add(obj.getObjectID());
-                        appendLog("Object DETECTED: ID " + obj.getObjectID() +
-                                  " at X:" + (objectX - centerX) +
-                                  " Y:" + (objectY - centerY) +
-                                  " Alt:" + obj.getAltitude() + "m");
-                    }
-                } else {
-                    currentlyDetectedIDsInBeam.remove(obj.getObjectID()); 
-                }
-            } else {
-                if (currentlyDetectedIDsInBeam.contains(obj.getObjectID())) {
-                    appendLog("Object " + obj.getObjectID() + " out of radar range.");
-                    currentlyDetectedIDsInBeam.remove(obj.getObjectID());
-                }
-                obj.setCurrentlyDetectedByBeam(false); 
-            }
-        }
-        
-        updateDetectedObjectsList(); 
-        repaint(); 
+        updateDetectedObjectsList();
+        repaint();
     }
 }

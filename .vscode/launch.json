@@ -1,0 +1,33 @@
+{
+    "configurations": [
+        {
+            "type": "java",
+            "name": "SkyDefXRadarSimulator",
+            "request": "launch",
+            "mainClass": "SkyDefXRadarSimulator",
+            "projectName": "SkyDefX_78045339"
+        },
+        {
+            "type": "java",
+            "name": "WebcamTest",
+            "request": "launch",
+            "mainClass": "WebcamTest",
+            "projectName": "SkyDefX_78045339"
+        },
+        {
+            "type": "java",
+            "name": "Launch WebcamTest",
+            "request": "launch",
+            "mainClass": "WebcamTest",
+            "projectName": "SkyDefX",
+            "vmArgs": "-Djava.library.path=\"C:\\opencv\\build\\java\\x64\""
+        },
+        {
+            "type": "java",
+            "name": "Launch SkyDefXRadarSimulator",
+            "request": "launch",
+            "mainClass": "SkyDefXRadarSimulator",
+            "projectName": "YourNewProjectName"
+        }
+    ]
+}
