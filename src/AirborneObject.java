@@ -14,6 +14,7 @@ public class AirborneObject {
 
     private boolean currentlyDetectedByBeam; // True if recently detected by Python
     private long lastDetectionTimestamp; // Timestamp of the last Python detection update
+    private long prevDetectionTimestamp = 0;
 
     public static final long DETECTION_FADE_DURATION = 1500; // Time in milliseconds for detection status to fade
 
@@ -32,6 +33,8 @@ public class AirborneObject {
 
     // Update position and add to trail
     public void updatePosition(double newX, double newY, int newAltitude) {
+        this.prevDetectionTimestamp = this.lastDetectionTimestamp;
+        this.lastDetectionTimestamp = System.currentTimeMillis();
         this.x = newX;
         this.y = newY;
         this.altitude = newAltitude;
@@ -40,7 +43,6 @@ public class AirborneObject {
         if (trail.size() > MAX_TRAIL_LENGTH) {
             trail.removeFirst(); // Keep trail length fixed
         }
-        this.lastDetectionTimestamp = System.currentTimeMillis();
         this.currentlyDetectedByBeam = true; // Mark as detected immediately upon update
     }
 
@@ -78,5 +80,34 @@ public class AirborneObject {
         if (detected) {
             this.lastDetectionTimestamp = System.currentTimeMillis();
         }
+    }
+
+    public double getSpeed(double pixelsPerMeter) {
+        if (trail.size() < 2 || prevDetectionTimestamp == 0) return 0.0;
+        long timeDeltaMs = lastDetectionTimestamp - prevDetectionTimestamp;
+        if (timeDeltaMs <= 0) return 0.0;
+        
+        Point2D.Double p1 = trail.get(trail.size() - 2);
+        Point2D.Double p2 = trail.getLast();
+        double dx = (p2.x - p1.x) / pixelsPerMeter;
+        double dy = (p2.y - p1.y) / pixelsPerMeter;
+        double distMeters = Math.sqrt(dx * dx + dy * dy);
+        
+        double speedMps = distMeters / (timeDeltaMs / 1000.0);
+        if (speedMps > 100.0) speedMps = 100.0; // clamp speed
+        return speedMps;
+    }
+
+    public double getHeading() {
+        if (trail.size() < 2) return 0.0;
+        Point2D.Double p1 = trail.get(trail.size() - 2);
+        Point2D.Double p2 = trail.getLast();
+        
+        double dx = p2.x - p1.x;
+        double dy = p1.y - p2.y; // screen coordinates are inverted vertically
+        
+        double angleRad = Math.atan2(dx, dy);
+        double angleDeg = Math.toDegrees(angleRad);
+        return (angleDeg + 360) % 360;
     }
 }

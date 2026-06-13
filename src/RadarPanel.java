@@ -1,3 +1,4 @@
+// RadarPanel.java
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
@@ -20,7 +21,6 @@ class RadarPanel extends JPanel implements ActionListener {
     // --- Private Fields ---
     private double beamAngle = 0;
     private Timer timer;
-    // Changed to Map for easy lookup by objectID from Python
     private Map<String, AirborneObject> detectedObjectsMap;
     private List<AirborneObject> activeObjectsList; // To maintain drawing order, will be derived from map values
     private JTextArea detectedObjectsListArea;
@@ -39,8 +39,15 @@ class RadarPanel extends JPanel implements ActionListener {
     private static final double MAX_RADAR_RANGE_METERS = 5000; // Max range of our simulated radar in meters
     private double pixelsPerMeter; // Calculated based on panel size
 
+    // Tactical Threat Assessment Core Fields
+    private MainControlDashboard dashboard;
+    private String currentThreatLevel = "GREEN";
+    private long lastBeepTime = 0;
+    private java.util.Set<String> acknowledgedAlerts = ConcurrentHashMap.newKeySet(); // Set of acknowledged target IDs
+
     // --- Constructor ---
-    public RadarPanel(JTextArea detectedObjectsListArea, JTextArea systemLogArea) {
+    public RadarPanel(MainControlDashboard dashboard, JTextArea detectedObjectsListArea, JTextArea systemLogArea) {
+        this.dashboard = dashboard;
         this.detectedObjectsListArea = detectedObjectsListArea;
         this.systemLogArea = systemLogArea;
 
@@ -61,15 +68,24 @@ class RadarPanel extends JPanel implements ActionListener {
             }
         });
 
-        appendLog("System initialized. Radar online. Waiting for detections...");
+        appendLog("System initialized. Radar online. Threat Assessment Core activated.");
     }
 
     // --- Helper Method to Append to System Log ---
-    private void appendLog(String message) {
+    public void appendLog(String message) {
         SwingUtilities.invokeLater(() -> {
             systemLogArea.append(LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")) + " - " + message + "\n");
             systemLogArea.setCaretPosition(systemLogArea.getDocument().getLength());
         });
+    }
+
+    public void acknowledgeSelectedTargetAlert() {
+        if (selectedObject != null) {
+            String id = selectedObject.getObjectID();
+            acknowledgedAlerts.add(id);
+            appendLog("ALERT ACKNOWLEDGED: Silenced warning alarms for target " + id);
+            updateThreatSystemAndUI();
+        }
     }
 
     // --- Helper Method to Update Detected Objects List ---
@@ -155,6 +171,10 @@ class RadarPanel extends JPanel implements ActionListener {
         updateDetectedObjectsList();
     }
 
+    public AirborneObject getSelectedObject() {
+        return selectedObject;
+    }
+
     // --- handlePythonDetection Method ---
     // This is the primary entry point for Python-originated detection data
     public void handlePythonDetection(JSONObject droneData) {
@@ -180,16 +200,6 @@ class RadarPanel extends JPanel implements ActionListener {
             // Convert degrees to radians for trigonometric functions
             double azimuthRad = Math.toRadians(azimuthDeg);
             double elevationRad = Math.toRadians(elevationDeg);
-
-            // Convert polar to Cartesian coordinates for display on panel
-            // Radar display typically has 0 degrees (North) at the top, increasing clockwise.
-            // Java's Math.sin/cos use radians, where 0 is along the positive X-axis (right),
-            // and angles increase counter-clockwise.
-            // To map:
-            // Radar North (0 deg) -> Java angle for (0, -Y) -> Math.toRadians(0 - 90) = -PI/2
-            // Radar East (90 deg) -> Java angle for (+X, 0) -> Math.toRadians(90 - 90) = 0
-            // Radar South (180 deg) -> Java angle for (0, +Y) -> Math.toRadians(180 - 90) = PI/2
-            // Radar West (270 deg) -> Java angle for (-X, 0) -> Math.toRadians(270 - 90) = PI
 
             double scaledDistance = distanceMeters * pixelsPerMeter;
             int centerX = getWidth() / 2;
@@ -253,6 +263,39 @@ class RadarPanel extends JPanel implements ActionListener {
                     2 * currentRadius, 2 * currentRadius);
         }
 
+        // Draw Software-Defined Geofence Zones
+        double mppScale = (double) radius / MAX_RADAR_RANGE_METERS;
+        double warningRadius = 2500.0 * mppScale;
+        double restrictedRadius = 1500.0 * mppScale;
+
+        // 1. Warning Zone (Amber Dashed Circle)
+        g2d.setColor(new Color(255, 165, 0, 20)); // Translucent amber fill
+        g2d.fillOval((int)(centerX - warningRadius), (int)(centerY - warningRadius), (int)(2 * warningRadius), (int)(2 * warningRadius));
+        
+        g2d.setColor(new Color(255, 165, 0, 90)); // Amber dashed outline
+        Stroke dashedAmber = new BasicStroke(1.5f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10.0f, new float[]{6.0f, 4.0f}, 0.0f);
+        g2d.setStroke(dashedAmber);
+        g2d.drawOval((int)(centerX - warningRadius), (int)(centerY - warningRadius), (int)(2 * warningRadius), (int)(2 * warningRadius));
+
+        // 2. Restricted Zone (Red Dashed Circle)
+        g2d.setColor(new Color(255, 50, 50, 25)); // Translucent red fill
+        g2d.fillOval((int)(centerX - restrictedRadius), (int)(centerY - restrictedRadius), (int)(2 * restrictedRadius), (int)(2 * restrictedRadius));
+        
+        g2d.setColor(new Color(255, 50, 50, 130)); // Red dashed outline
+        Stroke dashedRed = new BasicStroke(2.0f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10.0f, new float[]{8.0f, 4.0f}, 0.0f);
+        g2d.setStroke(dashedRed);
+        g2d.drawOval((int)(centerX - restrictedRadius), (int)(centerY - restrictedRadius), (int)(2 * restrictedRadius), (int)(2 * restrictedRadius));
+        
+        // Reset stroke
+        g2d.setStroke(new BasicStroke(1));
+
+        // Text Labels for Geofence
+        g2d.setFont(new Font("Monospaced", Font.BOLD, 10));
+        g2d.setColor(new Color(255, 165, 0, 150));
+        g2d.drawString("WARNING ZONE (2500M)", (int)(centerX - warningRadius + 8), (int)(centerY - warningRadius + 14));
+        g2d.setColor(new Color(255, 100, 100, 200));
+        g2d.drawString("RESTRICTED ZONE (1500M)", (int)(centerX - restrictedRadius + 8), (int)(centerY - restrictedRadius + 14));
+
         // Draw the Radar Beam Afterglow
         float alphaStepBeam = 1.0f / MAX_BEAM_HISTORY_SIZE;
         int currentBeamIndex = 0;
@@ -263,8 +306,6 @@ class RadarPanel extends JPanel implements ActionListener {
             g2d.setColor(new Color(50, 255, 50, (int)(alpha * 150)));
             g2d.setStroke(new BasicStroke(3));
 
-            // Adjust beam angle for drawing: Java's 0 is right, positive is CCW. Radar's 0 is up, positive is CW.
-            // Need to rotate by -90 degrees (or -PI/2 radians)
             int histBeamX = (int) (centerX + radius * Math.cos(historyAngle - Math.PI / 2));
             int histBeamY = (int) (centerY + radius * Math.sin(historyAngle - Math.PI / 2));
             g2d.drawLine(centerX, centerY, histBeamX, histBeamY);
@@ -290,7 +331,6 @@ class RadarPanel extends JPanel implements ActionListener {
             double distanceToCenter = Math.sqrt(Math.pow(obj.getX() + obj.getSize()/2.0 - centerX, 2) + Math.pow(obj.getY() + obj.getSize()/2.0 - centerY, 2));
 
             if (distanceToCenter > radius || (currentTime - obj.getLastDetectionTimestamp() > OBJECT_EXPIRATION_TIME)) {
-                // Object out of range or expired, will be removed from list later. Don't draw now.
                 continue;
             }
 
@@ -313,6 +353,41 @@ class RadarPanel extends JPanel implements ActionListener {
                 }
             }
 
+            // Draw Heading Velocity Vector
+            if (currentTrail.size() >= 2) {
+                double speed = obj.getSpeed(mppScale);
+                if (speed > 0.5) { // Only draw vector line if target is moving
+                    double headingDeg = obj.getHeading();
+                    double headingRad = Math.toRadians(headingDeg);
+                    
+                    // Vector length scales with speed (e.g. 1.5 pixels per m/s)
+                    double vectorLength = Math.max(15.0, Math.min(50.0, speed * 1.5));
+                    
+                    // Screen-space dx and dy
+                    int startX = (int)(obj.getX() + obj.getSize() / 2.0);
+                    int startY = (int)(obj.getY() + obj.getSize() / 2.0);
+                    int endX = (int)(startX + vectorLength * Math.sin(headingRad));
+                    int endY = (int)(startY - vectorLength * Math.cos(headingRad));
+                    
+                    // Draw vector line
+                    g2d.setColor(new Color(50, 255, 50, 180)); // Semi-transparent green
+                    g2d.setStroke(new BasicStroke(2.0f));
+                    g2d.drawLine(startX, startY, endX, endY);
+                    
+                    // Draw vector arrowhead
+                    double arrowAngle = Math.PI / 6; // 30 degrees arrowhead spread
+                    int arrowSize = 6;
+                    int xLeft = (int)(endX - arrowSize * Math.sin(headingRad - arrowAngle));
+                    int yLeft = (int)(endY + arrowSize * Math.cos(headingRad - arrowAngle));
+                    int xRight = (int)(endX - arrowSize * Math.sin(headingRad + arrowAngle));
+                    int yRight = (int)(endY + arrowSize * Math.cos(headingRad + arrowAngle));
+                    
+                    g2d.drawLine(endX, endY, xLeft, yLeft);
+                    g2d.drawLine(endX, endY, xRight, yRight);
+                    g2d.setStroke(new BasicStroke(1.0f));
+                }
+            }
+
             // Draw highlight if this object is selected
             if (obj == selectedObject) {
                 g2d.setColor(new Color(255, 165, 0)); // Orange highlight
@@ -322,7 +397,7 @@ class RadarPanel extends JPanel implements ActionListener {
             }
 
             // Draw object and "DETECTED!" text
-            obj.draw(g2d); // AirborneObject's draw method handles yellow/red based on lastDetectionTimestamp
+            obj.draw(g2d);
 
             if (obj.isCurrentlyDetectedByBeam() && (currentTime - obj.getLastDetectionTimestamp() < DETECTION_DISPLAY_DURATION)) {
                 g2d.setColor(new Color(255, 255, 0)); // Bright yellow for DETECTED text and lines
@@ -363,7 +438,6 @@ class RadarPanel extends JPanel implements ActionListener {
         long currentTime = System.currentTimeMillis();
         List<String> objectIDsToRemove = new ArrayList<>();
 
-        // Iterate through activeObjectsList for removal (CopyOnWriteArrayList allows safe iteration during modification)
         for (AirborneObject obj : activeObjectsList) {
             // If an object hasn't been updated by Python for OBJECT_EXPIRATION_TIME, remove it
             if (currentTime - obj.getLastDetectionTimestamp() > OBJECT_EXPIRATION_TIME) {
@@ -381,9 +455,113 @@ class RadarPanel extends JPanel implements ActionListener {
         for (String id : objectIDsToRemove) {
             detectedObjectsMap.remove(id);
             activeObjectsList.removeIf(obj -> obj.getObjectID().equals(id));
+            acknowledgedAlerts.remove(id); // Clean up ack list
         }
 
+        updateThreatSystemAndUI();
         updateDetectedObjectsList();
         repaint();
+    }
+
+    private void updateThreatSystemAndUI() {
+        if (dashboard == null) return;
+
+        int centerX = getWidth() / 2;
+        int centerY = getHeight() / 2;
+        int radius = Math.min(centerX, centerY) - 20;
+        double mppScale = (double) radius / MAX_RADAR_RANGE_METERS;
+        double warningRadius = 2500.0 * mppScale;
+        double restrictedRadius = 1500.0 * mppScale;
+
+        boolean hasActiveObjects = false;
+        boolean hasIntruder = false;
+        boolean hasUnacknowledgedIntruder = false;
+        long currentTime = System.currentTimeMillis();
+
+        // Calculate Sectors counts & proximity threats
+        int ne = 0, se = 0, sw = 0, nw = 0;
+        String newThreatLevel = "GREEN";
+
+        for (AirborneObject obj : activeObjectsList) {
+            if (currentTime - obj.getLastDetectionTimestamp() <= OBJECT_EXPIRATION_TIME) {
+                hasActiveObjects = true;
+                double distanceToCenter = Math.sqrt(
+                    Math.pow(obj.getX() + obj.getSize()/2.0 - centerX, 2) +
+                    Math.pow(obj.getY() + obj.getSize()/2.0 - centerY, 2)
+                );
+
+                // Sector checks
+                double dx = obj.getX() + obj.getSize()/2.0 - centerX;
+                double dy = centerY - (obj.getY() + obj.getSize()/2.0); // Positive up
+                if (dx >= 0 && dy >= 0) ne++;
+                else if (dx >= 0 && dy < 0) se++;
+                else if (dx < 0 && dy < 0) sw++;
+                else nw++;
+
+                // Threat assessments
+                if (distanceToCenter <= restrictedRadius) {
+                    hasIntruder = true;
+                    if (!acknowledgedAlerts.contains(obj.getObjectID())) {
+                        hasUnacknowledgedIntruder = true;
+                    }
+                } else if (distanceToCenter <= warningRadius) {
+                    if (!"RED".equals(newThreatLevel)) {
+                        newThreatLevel = "AMBER";
+                    }
+                }
+            }
+        }
+
+        if (hasIntruder) {
+            newThreatLevel = "RED";
+        }
+
+        currentThreatLevel = newThreatLevel;
+        dashboard.updateThreatLevel(currentThreatLevel);
+        dashboard.updateSectorStats(ne, se, sw, nw);
+
+        // Sound alert system
+        if (hasUnacknowledgedIntruder) {
+            long now = System.currentTimeMillis();
+            if (now - lastBeepTime > 2000) {
+                java.awt.Toolkit.getDefaultToolkit().beep();
+                lastBeepTime = now;
+            }
+        }
+
+        // Update selected target detailed kinematics card
+        AirborneObject selected = selectedObject;
+        if (selected != null && (currentTime - selected.getLastDetectionTimestamp() <= OBJECT_EXPIRATION_TIME)) {
+            double distanceToCenter = Math.sqrt(
+                Math.pow(selected.getX() + selected.getSize()/2.0 - centerX, 2) +
+                Math.pow(selected.getY() + selected.getSize()/2.0 - centerY, 2)
+            );
+            double range = distanceToCenter / mppScale;
+            double bearing = selected.getHeading();
+            double speed = selected.getSpeed(mppScale);
+            int alt = selected.getAltitude();
+
+            // Sector name
+            double dx = selected.getX() + selected.getSize()/2.0 - centerX;
+            double dy = centerY - (selected.getY() + selected.getSize()/2.0);
+            String sector = "N/A";
+            if (dx >= 0 && dy >= 0) sector = "NE";
+            else if (dx >= 0 && dy < 0) sector = "SE";
+            else if (dx < 0 && dy < 0) sector = "SW";
+            else sector = "NW";
+
+            // Target threat
+            String targetThreat = "GREEN";
+            if (distanceToCenter <= restrictedRadius) {
+                targetThreat = "RED";
+            } else if (distanceToCenter <= warningRadius) {
+                targetThreat = "AMBER";
+            }
+
+            boolean isAcked = acknowledgedAlerts.contains(selected.getObjectID());
+            dashboard.updateSelectedTarget(selected.getObjectID(), range, bearing, speed, alt, sector, isAcked, targetThreat);
+        } else {
+            dashboard.updateSelectedTarget(null, 0.0, 0.0, 0.0, 0, "N/A", false, "NONE");
+        }
     }
 }

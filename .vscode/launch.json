@@ -5,6 +5,13 @@
             "name": "SkyDefXRadarSimulator",
             "request": "launch",
             "mainClass": "SkyDefXRadarSimulator",
+            "projectName": "SkyDefX_7791705b"
+        },
+        {
+            "type": "java",
+            "name": "SkyDefXRadarSimulator",
+            "request": "launch",
+            "mainClass": "SkyDefXRadarSimulator",
             "projectName": "SkyDefX_78045339"
         },
         {
