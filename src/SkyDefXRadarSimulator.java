@@ -81,7 +81,10 @@ public class SkyDefXRadarSimulator extends JFrame implements KeyListener, Action
             public void windowClosing(WindowEvent e) {
                 stopServer(); // Stop the server when the window closes
                 SoundPlayer.stopAllSounds();
-                System.out.println("SkyDefXRadarSimulator: Application closing. Server and sounds stopped.");
+                if (mainControlDashboard != null) {
+                    mainControlDashboard.shutdown();
+                }
+                System.out.println("SkyDefXRadarSimulator: Application closing. Server, map threads, and sounds stopped.");
             }
         });
 

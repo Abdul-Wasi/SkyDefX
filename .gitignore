@@ -26,3 +26,6 @@ Thumbs.db              # Windows thumbnail cache
 *.txt
 # Resource files (if you don't want them tracked)
 # /res/sounds/*.wav   # Uncomment if you want to exclude actual audio files
+
+# Local tile cache directory
+.cache/
