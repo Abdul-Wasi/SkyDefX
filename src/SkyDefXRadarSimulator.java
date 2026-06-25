@@ -164,8 +164,8 @@ public class SkyDefXRadarSimulator extends JFrame implements KeyListener, Action
             serverExecutor.shutdownNow(); // Interrupt server thread
         }
         try {
-            if (clientSocket != null) clientSocket.close(); // Close any active client connection
-            if (serverSocket != null) serverSocket.close(); // Close the server socket
+            if (clientSocket != null) clientSocket.close(); // Close any active client connection.
+            if (serverSocket != null) serverSocket.close(); // Close the server socket.
         } catch (IOException e) {
             System.err.println("Java Radar Server: Error stopping server resources: " + e.getMessage());
         }
