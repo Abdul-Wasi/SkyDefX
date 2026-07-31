@@ -152,13 +152,27 @@ class RadarPanel extends JPanel implements ActionListener {
     private void updateDetectedObjectsList() {
         SwingUtilities.invokeLater(() -> {
             StringBuilder sb = new StringBuilder();
-            sb.append(String.format("%-10s %-10s %-10s %-8s %-8s\n", "ID", "EAST (m)", "NORTH (m)", "ALT (m)", "STATUS"));
-            sb.append("------------------------------------------------------------\n");
+            sb.append(String.format("%-12s %-10s %-10s %-8s %-10s %-12s\n", "ID", "EAST (m)", "NORTH (m)", "ALT (m)", "STATUS", "SOURCE"));
+            sb.append("------------------------------------------------------------------------\n");
 
             boolean detectedAny = false;
             long currentTime = System.currentTimeMillis();
 
             for (AirborneObject obj : activeObjectsList) {
+                if (obj.isMergedIntoDrone()) {
+                    continue; // Skip rendering merged raw sensor targets in the table
+                }
+                // Spatial Gating Filter: Only show raw LiDAR targets if they fall within 6 degrees of an active drone target.
+                // Only show raw Ultrasonic targets if they are within close range (< 3.0 meters).
+                if (obj.getObjectID().startsWith("LIDAR_TGT_")) {
+                    if (!isWithinGatedSlice(obj)) {
+                        continue;
+                    }
+                } else if (obj.getObjectID().startsWith("ULTRA_TGT_")) {
+                    if (obj.getDistance() >= 3.0) {
+                        continue;
+                    }
+                }
                 if (currentTime - obj.getLastDetectionTimestamp() < OBJECT_EXPIRATION_TIME) {
                     detectedAny = true;
                     int relativeE = (int) obj.getRelX();
@@ -173,8 +187,8 @@ class RadarPanel extends JPanel implements ActionListener {
                          status = "LAST SEEN";
                     }
 
-                    sb.append(String.format("%-10s %-10d %-10d %-8d %-8s\n",
-                                    obj.getObjectID(), relativeE, relativeN, obj.getAltitude(), status));
+                    sb.append(String.format("%-12s %-10d %-10d %-8d %-10s %-12s\n",
+                                    obj.getObjectID(), relativeE, relativeN, obj.getAltitude(), status, obj.getFusionSource()));
                 }
             }
 
@@ -251,6 +265,72 @@ class RadarPanel extends JPanel implements ActionListener {
             double elevationDeg = droneData.getDouble("elevation");
             double distanceMeters = droneData.getDouble("distance");
 
+            String fusionSource = "CAMERA";
+
+            // If it is a camera drone, check for active sensor targets to correlate and fuse
+            if (objectID.startsWith("DRONE_")) {
+                long now = System.currentTimeMillis();
+                
+                // 1. Look for closest active LiDAR target within ±6° azimuth
+                double minLidarDiff = Double.MAX_VALUE;
+                AirborneObject closestLidar = null;
+
+                for (AirborneObject other : activeObjectsList) {
+                    // Check if it is an active LiDAR target (updated within 1.5s)
+                    if (now - other.getLastDetectionTimestamp() < 1500 
+                            && other.getObjectID().startsWith("LIDAR_TGT_")) {
+                        
+                        // Calculate bearing from center
+                        double otherBearing = Math.toDegrees(Math.atan2(other.getRelX(), -other.getRelY()));
+                        otherBearing = (otherBearing + 360) % 360;
+                        
+                        double diff = Math.abs(azimuthDeg - otherBearing);
+                        if (diff > 180) diff = 360 - diff;
+                        
+                        if (diff <= 6.0 && diff < minLidarDiff) {
+                            minLidarDiff = diff;
+                            closestLidar = other;
+                        }
+                    }
+                }
+
+                if (closestLidar != null) {
+                    // Overwrite distance with precise LiDAR measurement
+                    distanceMeters = closestLidar.getDistance();
+                    fusionSource = "LIDAR";
+                    closestLidar.setMergedIntoDrone(true);
+                } else {
+                    // 2. Look for active Ultrasonic target within ±10° azimuth AND close-range (< 3.0 meters)
+                    AirborneObject ultraObj = detectedObjectsMap.get("ULTRA_TGT_01");
+                    if (ultraObj != null && now - ultraObj.getLastDetectionTimestamp() < 1500 && ultraObj.getDistance() < 3.0) {
+                        double ultraBearing = Math.toDegrees(Math.atan2(ultraObj.getRelX(), -ultraObj.getRelY()));
+                        ultraBearing = (ultraBearing + 360) % 360;
+                        
+                        double diff = Math.abs(azimuthDeg - ultraBearing);
+                        if (diff > 180) diff = 360 - diff;
+                        
+                        if (diff <= 10.0) {
+                            // Overwrite distance with precise Ultrasonic measurement
+                            distanceMeters = ultraObj.getDistance();
+                            fusionSource = "ULTRASONIC";
+                            ultraObj.setMergedIntoDrone(true);
+                        }
+                    }
+                }
+            } else {
+                // If it is a sensor target, reset its merged state by default
+                // It will be set to merged on the next camera processing frame if it correlates
+                AirborneObject existing = detectedObjectsMap.get(objectID);
+                if (existing != null) {
+                    existing.setMergedIntoDrone(false);
+                }
+                if (objectID.startsWith("LIDAR_TGT_")) {
+                    fusionSource = "LIDAR";
+                } else if (objectID.startsWith("ULTRA_TGT_")) {
+                    fusionSource = "ULTRASONIC";
+                }
+            }
+
             double azimuthRad = Math.toRadians(azimuthDeg);
             double elevationRad = Math.toRadians(elevationDeg);
 
@@ -268,11 +348,13 @@ class RadarPanel extends JPanel implements ActionListener {
 
             if (obj == null) {
                 obj = new AirborneObject(objectID, relX, relY, displayAltitude, objectSize);
+                obj.setFusionSource(fusionSource);
                 detectedObjectsMap.put(objectID, obj);
                 activeObjectsList.add(obj);
-                appendLog("NEW DETECTED: ID " + objectID + String.format(" at E:%dm, N:%dm, Alt:%dm (Webcam)",
-                                (int)relX, (int)-relY, displayAltitude));
+                appendLog("NEW DETECTED: ID " + objectID + String.format(" at E:%dm, N:%dm, Alt:%dm (Source: %s)",
+                                (int)relX, (int)-relY, displayAltitude, fusionSource));
             } else {
+                obj.setFusionSource(fusionSource);
                 obj.updatePosition(relX, relY, displayAltitude);
             }
             obj.setCurrentlyDetectedByBeam(true);
@@ -284,6 +366,31 @@ class RadarPanel extends JPanel implements ActionListener {
             e.printStackTrace();
         }
         repaint();
+    }
+
+    // Spatial Gating check: returns true if the raw LiDAR target aligns within 6.0 degrees bearing of any actively tracked drone.
+    private boolean isWithinGatedSlice(AirborneObject rawObj) {
+        if (!rawObj.getObjectID().startsWith("LIDAR_TGT_")) {
+            return true;
+        }
+        long now = System.currentTimeMillis();
+        double rawBearing = Math.toDegrees(Math.atan2(rawObj.getRelX(), -rawObj.getRelY()));
+        rawBearing = (rawBearing + 360) % 360;
+        
+        for (AirborneObject other : activeObjectsList) {
+            if (other.getObjectID().startsWith("DRONE_") && (now - other.getLastDetectionTimestamp() < 2000)) {
+                double droneBearing = Math.toDegrees(Math.atan2(other.getRelX(), -other.getRelY()));
+                droneBearing = (droneBearing + 360) % 360;
+                
+                double diff = Math.abs(rawBearing - droneBearing);
+                if (diff > 180) diff = 360 - diff;
+                
+                if (diff <= 6.0) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     @Override
@@ -399,9 +506,22 @@ class RadarPanel extends JPanel implements ActionListener {
         long currentTime = System.currentTimeMillis();
 
         for (AirborneObject obj : activeObjectsList) {
+            if (obj.isMergedIntoDrone()) {
+                continue; // Skip rendering merged raw sensor targets on the screen
+            }
+            // Spatial Gating Filter: Only show raw LiDAR targets if they fall within 6 degrees of an active drone target.
+            // Only show raw Ultrasonic targets if they are within close range (< 3.0 meters).
+            if (obj.getObjectID().startsWith("LIDAR_TGT_")) {
+                if (!isWithinGatedSlice(obj)) {
+                    continue;
+                }
+            } else if (obj.getObjectID().startsWith("ULTRA_TGT_")) {
+                if (obj.getDistance() >= 3.0) {
+                    continue;
+                }
+            }
             // Check if object is within visible radar range or too old
             if (obj.getDistance() > maxRadarRange || (currentTime - obj.getLastDetectionTimestamp() > OBJECT_EXPIRATION_TIME)) {
-
                 continue;
             }
 
@@ -621,9 +741,9 @@ class RadarPanel extends JPanel implements ActionListener {
             }
 
             boolean isAcked = acknowledgedAlerts.contains(selected.getObjectID());
-            dashboard.updateSelectedTarget(selected.getObjectID(), range, bearing, speed, alt, sector, isAcked, targetThreat);
+            dashboard.updateSelectedTarget(selected.getObjectID(), range, bearing, speed, alt, sector, isAcked, targetThreat, selected.getFusionSource());
         } else {
-            dashboard.updateSelectedTarget(null, 0.0, 0.0, 0.0, 0, "N/A", false, "NONE");
+            dashboard.updateSelectedTarget(null, 0.0, 0.0, 0.0, 0, "N/A", false, "NONE", "N/A");
         }
     }
 

@@ -15,6 +15,7 @@ import org.json.JSONObject;
 
 public class MainControlDashboard extends JPanel {
     private RadarPanel radarPanel;
+    private VideoFeedPanel videoFeedPanel; // NEW: Live Optical Video feed panel
     private JTextArea detectedObjectsListArea;
     private JTextArea systemLogArea;
 
@@ -31,6 +32,7 @@ public class MainControlDashboard extends JPanel {
     private JLabel zoomLabel;
     private JLabel resLabel;
     private JComboBox<String> presetBox;
+    private JPanel westPanel;
 
     // Autocomplete fields
     private JPopupMenu suggestPopup;
@@ -60,12 +62,38 @@ public class MainControlDashboard extends JPanel {
         topPanel.setLayout(new BorderLayout());
         topPanel.setBorder(BorderFactory.createMatteBorder(0, 0, 2, 0, new Color(0, 100, 0)));
 
-        JLabel titleLabel = new JLabel("  SKYDEF-X: TACTICAL CONTROL CENTER & RADAR FEED", FlowLayout.LEFT);
+        // Create Config Toggle Button
+        JButton configBtn = new JButton("[CONFIG NODE]");
+        configBtn.setFont(new Font("Monospaced", Font.BOLD, 11));
+        configBtn.setBackground(new Color(30, 30, 30));
+        configBtn.setForeground(new Color(50, 255, 50));
+        configBtn.setFocusPainted(false);
+        configBtn.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(0, 100, 0), 1),
+            BorderFactory.createEmptyBorder(6, 12, 6, 12)
+        ));
+        configBtn.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        configBtn.addActionListener(e -> {
+            if (westPanel != null) {
+                boolean isVisible = westPanel.isVisible();
+                westPanel.setVisible(!isVisible);
+                configBtn.setText(isVisible ? "[CONFIG NODE]" : "[HIDE CONFIG]");
+                revalidate();
+                repaint();
+            }
+        });
+
+        JLabel titleLabel = new JLabel("SKYDEF-X: TACTICAL RADAR VISUALIZER");
         titleLabel.setForeground(new Color(50, 255, 50));
-        titleLabel.setFont(new Font("Monospaced", Font.BOLD, 20));
-        topPanel.add(titleLabel, BorderLayout.WEST);
+        titleLabel.setFont(new Font("Monospaced", Font.BOLD, 18));
+
+        JPanel leftHeaderPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 10));
+        leftHeaderPanel.setOpaque(false);
+        leftHeaderPanel.add(configBtn);
+        leftHeaderPanel.add(titleLabel);
+        topPanel.add(leftHeaderPanel, BorderLayout.WEST);
         
-        JLabel subtitleLabel = new JLabel("STATUS: NODE ONLINE  ", FlowLayout.RIGHT);
+        JLabel subtitleLabel = new JLabel("STATUS: SYSTEM ACTIVE  ");
         subtitleLabel.setForeground(new Color(0, 200, 0));
         subtitleLabel.setFont(new Font("Monospaced", Font.PLAIN, 12));
         topPanel.add(subtitleLabel, BorderLayout.EAST);
@@ -108,7 +136,7 @@ public class MainControlDashboard extends JPanel {
         detectedObjectsListArea.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
         
         JScrollPane detectedScrollPane = new JScrollPane(detectedObjectsListArea);
-        detectedScrollPane.setPreferredSize(new Dimension(340, 0));
+        detectedScrollPane.setPreferredSize(new Dimension(400, 0));
         
         TitledBorder targetBorder = BorderFactory.createTitledBorder(
             BorderFactory.createLineBorder(new Color(0, 80, 0), 1),
@@ -131,14 +159,14 @@ public class MainControlDashboard extends JPanel {
 
         // --- Left Sidebar (Software-Defined Threat Panel) ---
         JPanel sidebarPanel = new JPanel();
-        sidebarPanel.setPreferredSize(new Dimension(280, 0));
+        sidebarPanel.setPreferredSize(new Dimension(220, 0));
         sidebarPanel.setBackground(new Color(15, 15, 15));
         sidebarPanel.setBorder(BorderFactory.createTitledBorder(
                 BorderFactory.createLineBorder(new Color(0, 80, 0), 1),
-                "THREAT ASSESSMENT CORE",
+                "THREAT ASSESS CORE",
                 javax.swing.border.TitledBorder.CENTER,
                 javax.swing.border.TitledBorder.TOP,
-                new Font("Monospaced", Font.BOLD, 12),
+                new Font("Monospaced", Font.BOLD, 11),
                 new Color(50, 255, 50)
         ));
         sidebarPanel.setLayout(new GridBagLayout());
@@ -161,7 +189,7 @@ public class MainControlDashboard extends JPanel {
             BorderFactory.createEmptyBorder(8, 8, 8, 8)
         ));
 
-        targetKinematicsLabel = new JLabel("<html><font color='#00ff00'>SELECTED TARGET:</font><br>ID: NONE<br>Range: N/A<br>Bearing: N/A<br>Speed: N/A<br>Altitude: N/A</html>");
+        targetKinematicsLabel = new JLabel("<html><font color='#00ff00'>SELECTED TARGET:</font><br>ID: NONE<br>Range: N/A<br>Bearing: N/A<br>Speed: N/A<br>Altitude: N/A<br>Source: N/A</html>");
         targetKinematicsLabel.setFont(new Font("Monospaced", Font.PLAIN, 12));
         targetKinematicsLabel.setForeground(Color.LIGHT_GRAY);
         targetKinematicsLabel.setBorder(BorderFactory.createCompoundBorder(
@@ -217,12 +245,21 @@ public class MainControlDashboard extends JPanel {
         gbc.fill = GridBagConstraints.BOTH;
         sidebarPanel.add(new JPanel() {{ setOpaque(false); }}, gbc);
 
+        JPanel eastPanel = new JPanel(new BorderLayout());
+        eastPanel.setPreferredSize(new Dimension(320, 0));
+        eastPanel.setBackground(Color.BLACK);
+        eastPanel.add(detectedScrollPane, BorderLayout.CENTER);
+        
+        videoFeedPanel = new VideoFeedPanel();
+        eastPanel.add(videoFeedPanel, BorderLayout.SOUTH);
+        
         centerPanel.add(radarPanel, BorderLayout.CENTER);
-        centerPanel.add(detectedScrollPane, BorderLayout.EAST);
+        centerPanel.add(eastPanel, BorderLayout.EAST);
         centerPanel.add(sidebarPanel, BorderLayout.WEST);
 
         // --- Left Panel (West - Radar Node & Map Controls) ---
-        JPanel westPanel = new JPanel();
+        westPanel = new JPanel();
+        westPanel.setVisible(false); // Collapsed by default for a clean user experience!
         westPanel.setLayout(new BoxLayout(westPanel, BoxLayout.Y_AXIS));
         westPanel.setPreferredSize(new Dimension(280, 0));
         westPanel.setBackground(new Color(20, 22, 20));
@@ -659,10 +696,10 @@ public class MainControlDashboard extends JPanel {
         });
     }
 
-    public void updateSelectedTarget(String id, double range, double bearing, double speed, int alt, String sector, boolean isAcked, String threat) {
+    public void updateSelectedTarget(String id, double range, double bearing, double speed, int alt, String sector, boolean isAcked, String threat, String fusionSource) {
         SwingUtilities.invokeLater(() -> {
             if (id == null) {
-                targetKinematicsLabel.setText("<html><font color='#00ff00'>SELECTED TARGET:</font><br>ID: NONE<br>Range: N/A<br>Bearing: N/A<br>Speed: N/A<br>Altitude: N/A</html>");
+                targetKinematicsLabel.setText("<html><font color='#00ff00'>SELECTED TARGET:</font><br>ID: NONE<br>Range: N/A<br>Bearing: N/A<br>Speed: N/A<br>Altitude: N/A<br>Source: N/A</html>");
                 ackButton.setEnabled(false);
                 ackButton.setText("ACKNOWLEDGE ALERT");
                 ackButton.setBackground(new Color(40, 40, 40));
@@ -674,8 +711,11 @@ public class MainControlDashboard extends JPanel {
                     "Bearing: %.1f° (%s)<br>" +
                     "Speed: %.1f m/s<br>" +
                     "Altitude: %d m<br>" +
+                    "Source: <font color='%s'>%s</font><br>" +
                     "Threat: <font color='%s'>%s</font></html>",
                     id, range, bearing, sector, speed, alt,
+                    "LIDAR".equals(fusionSource) ? "#00ffff" : ("ULTRASONIC".equals(fusionSource) ? "#ff00ff" : "#ffffff"),
+                    fusionSource,
                     "RED".equals(threat) ? "#ff3333" : ("AMBER".equals(threat) ? "#ffaa00" : "#00ff00"),
                     isAcked ? "ACKNOWLEDGED" : threat
                 ));
@@ -931,5 +971,9 @@ public class MainControlDashboard extends JPanel {
                 System.err.println("Suggestion fetch failed: " + e.getMessage());
             }
         }).start();
+    }
+
+    public VideoFeedPanel getVideoFeedPanel() {
+        return videoFeedPanel;
     }
 }

@@ -14,6 +14,10 @@ public class AirborneObject {
     private boolean currentlyDetectedByBeam;
     private long lastDetectionTimestamp;
     private long prevDetectionTimestamp = 0;
+    
+    // Sensor Fusion fields
+    private String fusionSource = "CAMERA"; // "CAMERA", "LIDAR", "ULTRASONIC"
+    private boolean mergedIntoDrone = false;
 
     public static final long DETECTION_FADE_DURATION = 1500; // Milliseconds
 
@@ -49,13 +53,31 @@ public class AirborneObject {
         double screenY = centerY + (relY * pixelsPerMeter) - size / 2.0;
 
         long currentTime = System.currentTimeMillis();
-        if (currentlyDetectedByBeam && (currentTime - lastDetectionTimestamp < DETECTION_FADE_DURATION)) {
+        boolean isActive = currentlyDetectedByBeam && (currentTime - lastDetectionTimestamp < DETECTION_FADE_DURATION);
+        
+        if (isActive) {
             g2d.setColor(new Color(255, 255, 0)); // Bright yellow when active
         } else {
             g2d.setColor(new Color(255, 0, 0)); // Red when fading
             currentlyDetectedByBeam = false;
         }
         g2d.fillRect((int) screenX, (int) screenY, size, size);
+
+        // Draw custom military-grade fusion indicator rings
+        if (isActive && objectID.startsWith("DRONE_")) {
+            if ("LIDAR".equals(fusionSource)) {
+                g2d.setColor(new Color(0, 255, 255, 200)); // Bright Cyan for LiDAR Fusion
+                g2d.setStroke(new BasicStroke(1.5f));
+                g2d.drawOval((int) screenX - 5, (int) screenY - 5, size + 10, size + 10);
+                g2d.drawString("FSD:LIDAR", (int) screenX - 15, (int) screenY - 8);
+            } else if ("ULTRASONIC".equals(fusionSource)) {
+                g2d.setColor(new Color(255, 0, 255, 200)); // Bright Magenta for Ultrasonic Fusion
+                g2d.setStroke(new BasicStroke(1.5f));
+                g2d.drawOval((int) screenX - 5, (int) screenY - 5, size + 10, size + 10);
+                g2d.drawString("FSD:ULTRA", (int) screenX - 15, (int) screenY - 8);
+            }
+            g2d.setStroke(new BasicStroke(1.0f)); // reset stroke
+        }
     }
 
     // Getters
@@ -111,4 +133,10 @@ public class AirborneObject {
         double angleDeg = Math.toDegrees(angleRad);
         return (angleDeg + 360) % 360;
     }
+
+    public String getFusionSource() { return fusionSource; }
+    public void setFusionSource(String source) { this.fusionSource = source; }
+
+    public boolean isMergedIntoDrone() { return mergedIntoDrone; }
+    public void setMergedIntoDrone(boolean merged) { this.mergedIntoDrone = merged; }
 }
